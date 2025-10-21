@@ -1,0 +1,1 @@
+// Thoughts Post Card Widget
