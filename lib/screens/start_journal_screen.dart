@@ -56,37 +56,55 @@ class _StartJournalScreenState extends State<StartJournalScreen> {
   }
 
   Future<String> _getAIInsights(String content) async {
-    const apiKey = 'KkL9cPI1bxjLSq30QecWONyhHkyXEbSxaw5Ecser';  // Replace with your actual Cohere API key
-    const url = 'https://api.cohere.ai/v1/generate';
+    if (content.trim().isEmpty) return 'No content to analyze.';
+
+    final baseUrl = "http://127.0.0.1:11434/api/generate"; // local Ollama
+    final modelName = "phi"; // your Ollama model
+
+    // Build prompt for mental health journaling
+    final prompt = '''
+You are MindEase AI, a supportive mental health companion.
+Analyze the following journal entry and provide empathetic feedback, insights, and possible coping exercises:
+
+$content
+''';
 
     try {
       final response = await http.post(
-        Uri.parse(url),
-        headers: {
-          'Authorization': 'Bearer $apiKey',
-          'Content-Type': 'application/json',
-        },
-        body: json.encode({
-          "model": "command", // Cohere's free model
-          "prompt": "You are MindEase AI, a supportive mental health companion. Analyze the following journal entry and give empathetic feedback, insights, and possible coping exercises :\n\n$content",
-          "max_tokens": 100,
-          "temperature": 0.7,
-          "stop_sequences": ["--"],  // Stops generating output after certain character
+        Uri.parse(baseUrl),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "model": modelName,
+          "prompt": prompt,
+          "stream": false,
+          "max_tokens": 200,
+          "temperature": 0.7
         }),
       );
 
       if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        return data['generations'][0]['text']?.trim() ?? 'No insights generated.';
+        final data = jsonDecode(response.body);
+        String text = data['response']?.trim() ?? "";
+        if (text.isEmpty) {
+          print("[StartJournalScreen] Empty AI response. Raw body:\n${response.body}");
+          text = "⚠️ Sorry, I couldn't process that entry.";
+        }
+        return text;
       } else {
-        print('Cohere API error: ${response.body}');
-        return 'Failed to analyze journal entry.';
+        print("[StartJournalScreen] Server error: ${response.statusCode}, body: ${response.body}");
+        return "Error: Unable to connect to AI server.";
       }
-    } catch (e) {
-      print('Error calling Cohere API: $e');
-      return 'Error during analysis.';
+    } catch (e, stack) {
+      print("[StartJournalScreen] Exception:\n$e\nSTACK TRACE:\n$stack");
+      return "⚠️ Error occurred while contacting AI.";
     }
   }
+
+
+
+
+
+
 
   @override
   Widget build(BuildContext context) {

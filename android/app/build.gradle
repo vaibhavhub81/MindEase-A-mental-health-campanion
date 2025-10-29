@@ -34,6 +34,7 @@ android {
         versionName = flutter.versionName
     }
 
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
@@ -50,4 +51,6 @@ flutter {
 dependencies {
     // ✅ Add this for desugaring support
     coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.3"
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.core:core:1.12.0'
 }

@@ -2,89 +2,139 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'chatbot_memory.dart';
 import 'chatbot_safety.dart';
-import 'dart:io';
+import 'package:hive_flutter/hive_flutter.dart';
 
 class ChatbotService {
-  final bool useEmulator;
-  ChatbotService({this.useEmulator = false});
+  final String baseUrl = "http://127.0.0.1:11434/api/generate";
 
-  String get baseUrl {
-    final host = useEmulator ? '10.0.2.2' : '127.0.0.1';
-    return "http://192.168.1.7:5000/generate";
-  }
-
-  Future<Map<String, String>> getChatResponse(String userMessage) async {
-    print("🧠 Sending message to AI: $userMessage");
-
+  /// Returns a Map with keys: 'text' (String) and 'mood' (String)
+  Future<Map<String, String>> getChatResponseWithMood(String userMessage) async {
     if (ChatbotSafety.detectCrisis(userMessage)) {
-      print("⚠️ Crisis detected in user message.");
-      return {'text': ChatbotSafety.crisisMessage, 'emotion': 'concerned'};
+      return {
+        'text': ChatbotSafety.crisisMessage,
+        'mood': 'stressed',
+      };
     }
 
-    try {
-      final recentChats = await ChatbotMemory.getRecentChats();
-      final context = recentChats.join("\n");
+    final profile = await ChatbotMemory.getUserProfile();
+    final recentChats = await ChatbotMemory.getRecentChats();
+    final recentMoods = await ChatbotMemory.getRecentMoods();
+    final journals = await ChatbotMemory.getJournals();
 
-      final prompt = '''
-You are MindEase, an empathetic mental health companion.
+    final box = Hive.box('userData');
+    final bool firstTime = box.get('firstTime', defaultValue: true);
+
+    // --- LIMIT HISTORY ---
+    final int maxRecent = 5;
+    final recentChatsTrimmed = recentChats.length > maxRecent
+        ? recentChats.sublist(recentChats.length - maxRecent)
+        : recentChats;
+    final recentMoodsTrimmed = recentMoods.length > maxRecent
+        ? recentMoods.sublist(recentMoods.length - maxRecent)
+        : recentMoods;
+    final recentJournalsTrimmed = journals.length > maxRecent
+        ? journals.sublist(journals.length - maxRecent)
+        : journals;
+
+    // --- OPTIONAL: USE SUMMARY ---
+    String chatSummary = box.get('chatSummary', defaultValue: '');
+    if (chatSummary.isEmpty && recentChatsTrimmed.isNotEmpty) {
+      chatSummary = recentChatsTrimmed.join(" | ");
+      await box.put('chatSummary', chatSummary);
+    }
+
+    final context = '''
+Summary of previous conversation: 
+$chatSummary
+
+Recent chats:
+${recentChatsTrimmed.join("\n")}
+
+Recent moods:
+${recentMoodsTrimmed.join(", ")}
+
+Recent journal entries:
+${recentJournalsTrimmed.join("\n")}
+''';
+
+    final prompt = '''
+You are MindEase, a ${profile.personality} mental health AI companion.
+- Respond thoughtfully and empathetically.
+- Keep your response concise (max 3 sentences) unless detail is required.
+- Avoid repeating coping suggestions unnecessarily.
+- Do not diagnose or prescribe medication.
+- Only suggest helplines in crisis situations.
+${firstTime ? "- This is the first interaction with the user. Respond briefly and do not introduce yourself." : ""}
+
 Context:
 $context
 
-User says:
-$userMessage
-Respond concisely and include an emotion tag in the response metadata (emotion: neutral/positive/concerned/encouraging).
+Respond to the following message from the user and also infer their current mood (happy, sad, anxious, stressed, lonely, excited, calm, neutral, frustrated). Return ONLY JSON with keys 'response' and 'mood':
+"$userMessage"
 ''';
 
-      print("📡 Sending request to $baseUrl ...");
-      final response = await http
-          .post(
+    try {
+      final response = await http.post(
         Uri.parse(baseUrl),
         headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"model": "phi", "prompt": prompt}),
-      )
-          .timeout(const Duration(seconds: 60));
-
-      print("✅ Response received with status: ${response.statusCode}");
+        body: jsonEncode({
+          "model": "phi",
+          "prompt": prompt,
+          "stream": false
+        }),
+      );
 
       if (response.statusCode == 200) {
-        try {
-          final map = jsonDecode(response.body);
-          String text = '';
-          String emotion = 'neutral';
+        final jsonData = jsonDecode(response.body);
+        String text = jsonData['response']?.trim() ?? "";
 
-          if (map is Map && map.containsKey('response')) {
-            text = (map['response'] ?? '').toString().trim();
-          } else if (map is Map && map.containsKey('text')) {
-            text = (map['text'] ?? '').toString().trim();
-            emotion = (map['emotion'] ?? 'neutral').toString();
-          } else {
-            text = response.body.toString();
-          }
-
-          if (text.isEmpty) text = "⚠️ Sorry, I couldn't process that.";
-          await ChatbotMemory.saveChat(userMessage, text);
-
-          print("💬 AI Response: $text");
-          print("😌 Emotion Detected: $emotion");
-
-          return {'text': text, 'emotion': emotion};
-        } catch (e) {
-          print("❌ JSON parsing failed: $e");
-          final raw = response.body.trim();
-          await ChatbotMemory.saveChat(userMessage, raw);
-          return {'text': raw, 'emotion': 'neutral'};
+        if (text.isEmpty) {
+          print("[ChatbotService] Empty AI response. Raw body:\n${response.body}");
+          text = "⚠️ Sorry, I couldn't process that.";
         }
+
+        // Simple fallback mood detection if AI doesn't return mood
+        String mood = "neutral";
+        if (jsonData.containsKey('mood')) {
+          mood = jsonData['mood'].toString();
+        } else {
+          mood = _detectMood(userMessage);
+        }
+
+        // Save chat
+        await ChatbotMemory.saveChat(userMessage, text);
+
+        // Update summary for next prompt (keep it concise)
+        chatSummary += " | $userMessage -> $text";
+        if (chatSummary.length > 500) chatSummary = chatSummary.substring(chatSummary.length - 500);
+        await box.put('chatSummary', chatSummary);
+
+        if (firstTime) {
+          await box.put('firstTime', false);
+        }
+
+        return {'text': text, 'mood': mood};
       } else {
-        print("🚨 Server returned error code: ${response.statusCode}");
-        return {
-          'text': 'Error: AI server returned ${response.statusCode}',
-          'emotion': 'neutral'
-        };
+        print("[ChatbotService] Server error. Status code: ${response.statusCode}, body: ${response.body}");
+        return {'text': "Error: Unable to connect to AI server.", 'mood': 'neutral'};
       }
     } catch (e, stack) {
-      print("🔥 Exception during chat request: $e");
-      print("📄 Stacktrace: $stack");
-      return {'text': '⚠️ Error communicating with AI: $e', 'emotion': 'neutral'};
+      print("[ChatbotService] Exception:\n$e\nSTACK TRACE:\n$stack");
+      return {'text': "⚠️ Error occurred while contacting AI.", 'mood': 'neutral'};
     }
+  }
+
+  // Fallback mood detectiona
+  String _detectMood(String text) {
+    final lower = text.toLowerCase();
+    if (lower.contains('happy') || lower.contains('joy') || lower.contains('good')) return "happy";
+    if (lower.contains('sad') || lower.contains('unhappy') || lower.contains('depressed')) return "sad";
+    if (lower.contains('anxious') || lower.contains('worried') || lower.contains('nervous')) return "anxious";
+    if (lower.contains('stressed') || lower.contains('pressure') || lower.contains('overwhelmed')) return "stressed";
+    if (lower.contains('lonely') || lower.contains('alone')) return "lonely";
+    if (lower.contains('excited') || lower.contains('thrilled') || lower.contains('happy')) return "excited";
+    if (lower.contains('calm') || lower.contains('relaxed') || lower.contains('peaceful')) return "calm";
+    if (lower.contains('frustrated') || lower.contains('annoyed') || lower.contains('irritated')) return "frustrated";
+    return "neutral";
   }
 }

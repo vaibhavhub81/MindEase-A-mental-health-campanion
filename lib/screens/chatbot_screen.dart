@@ -20,6 +20,9 @@ class _ChatbotPageState extends State<ChatbotPage> {
   Map<String, dynamic> intents = {};
   final Random _random = Random();
 
+  // NEW: Current mood state
+  String _currentMood = "neutral";
+
   @override
   void initState() {
     super.initState();
@@ -31,12 +34,6 @@ class _ChatbotPageState extends State<ChatbotPage> {
       final String data = await rootBundle.loadString('assets/intents.json');
       final Map<String, dynamic> parsed = json.decode(data);
 
-      if (parsed['intents'] == null || parsed['intents'].isEmpty) {
-        print('❌ intents.json loaded but "intents" is empty or missing.');
-      } else {
-        print('✅ intents.json loaded with ${parsed['intents'].length} intents.');
-      }
-
       setState(() {
         intents = parsed;
       });
@@ -44,7 +41,6 @@ class _ChatbotPageState extends State<ChatbotPage> {
       print('❌ Failed to load intents.json: $e');
     }
   }
-
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -69,8 +65,9 @@ class _ChatbotPageState extends State<ChatbotPage> {
     _controller.clear();
     _scrollToBottom();
 
-    // Save to Firestore
     final uid = FirebaseAuth.instance.currentUser?.uid;
+
+    // Save user message to Firestore
     if (uid != null) {
       await FirebaseFirestore.instance
           .collection('chat_history')
@@ -86,10 +83,15 @@ class _ChatbotPageState extends State<ChatbotPage> {
     Future.delayed(const Duration(milliseconds: 600), () async {
       final botReply = _getResponse(text);
 
+      // NEW: detect mood dynamically
+      String mood = _detectMood(text);
+
       setState(() {
         _messages.add({'text': botReply, 'sender': 'bot'});
+        _currentMood = mood; // update mood box
       });
 
+      // Save bot message to Firestore
       if (uid != null) {
         await FirebaseFirestore.instance
             .collection('chat_history')
@@ -100,10 +102,38 @@ class _ChatbotPageState extends State<ChatbotPage> {
           'text': botReply,
           'timestamp': FieldValue.serverTimestamp(),
         });
+
+        // Save mood separately to Firebase for analysis
+        await FirebaseFirestore.instance
+            .collection('mood_entries')
+            .doc(uid)
+            .collection('entries')
+            .add({
+          'mood': mood,
+          'message': text,
+          'timestamp': FieldValue.serverTimestamp(),
+        });
       }
 
       _scrollToBottom();
     });
+  }
+
+  /// NEW: Simple keyword-based mood detection
+  String _detectMood(String text) {
+    final lower = text.toLowerCase();
+    if (lower.contains('happy') || lower.contains('joy') || lower.contains('good')) {
+      return "happy";
+    } else if (lower.contains('sad') || lower.contains('unhappy') || lower.contains('depressed')) {
+      return "sad";
+    } else if (lower.contains('anxious') || lower.contains('worried') || lower.contains('nervous')) {
+      return "anxious";
+    } else if (lower.contains('stressed') || lower.contains('pressure') || lower.contains('overwhelmed')) {
+      return "stressed";
+    } else if (lower.contains('lonely') || lower.contains('alone')) {
+      return "lonely";
+    }
+    return "neutral";
   }
 
   String _getResponse(String input) {
@@ -115,24 +145,18 @@ class _ChatbotPageState extends State<ChatbotPage> {
     for (var intent in intents['intents']) {
       int score = 0;
 
-      // Boost score if user input has words in the tag itself
       final tag = intent['tag'].toString().toLowerCase();
       for (var word in inputWords) {
         if (tag.contains(word)) score += 2;
       }
 
-      // Match with pattern tokens
       for (var pattern in intent['patterns']) {
         final patternLower = pattern.toLowerCase();
         final patternWords = patternLower.split(RegExp(r'\s+'));
 
         for (var word in inputWords) {
-          if (patternWords.contains(word)) {
-            score += 1;
-          }
-          if (patternLower.contains(word)) {
-            score += 2;
-          }
+          if (patternWords.contains(word)) score += 1;
+          if (patternLower.contains(word)) score += 2;
         }
       }
 
@@ -142,13 +166,11 @@ class _ChatbotPageState extends State<ChatbotPage> {
       }
     }
 
-    // Use best matched intent if found and above threshold
     if (bestMatch != null && bestScore > 0) {
       final responses = List<String>.from(bestMatch['responses']);
       return responses[_random.nextInt(responses.length)];
     }
 
-    // Fallback
     final fallback = intents['intents'].firstWhere(
           (i) => i['tag'] == 'no-response',
       orElse: () => null,
@@ -162,7 +184,22 @@ class _ChatbotPageState extends State<ChatbotPage> {
     return "Hmm, I’m not sure how to respond to that.";
   }
 
-
+  Color _moodColor(String mood) {
+    switch (mood) {
+      case "happy":
+        return Colors.green;
+      case "sad":
+        return Colors.blue;
+      case "anxious":
+        return Colors.orange;
+      case "stressed":
+        return Colors.red;
+      case "lonely":
+        return Colors.purple;
+      default:
+        return Colors.grey;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -172,6 +209,26 @@ class _ChatbotPageState extends State<ChatbotPage> {
         title: const Text('Chat with MindEase'),
         backgroundColor: const Color(0xFF2C2C2E),
         centerTitle: true,
+        bottom: PreferredSize(
+          preferredSize: Size.fromHeight(40),
+          child: Container(
+            margin: EdgeInsets.all(8),
+            padding: EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+            decoration: BoxDecoration(
+              color: _moodColor(_currentMood),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Center(
+              child: Text(
+                "Mood: $_currentMood",
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
       body: Column(
         children: <Widget>[
@@ -240,3 +297,4 @@ class _ChatbotPageState extends State<ChatbotPage> {
     );
   }
 }
+
